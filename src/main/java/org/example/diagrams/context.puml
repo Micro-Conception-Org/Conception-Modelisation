@@ -1,0 +1,90 @@
+@startuml
+' ===========================
+' Context Diagram - Microservices
+' Plateforme Gestion Immobilière
+' ===========================
+
+skinparam rectangle {
+  Shadowing false
+  RoundCorner 8
+}
+
+title Contexte & communications — Plateforme Gestion Immobilière
+
+' ----- External actors -----
+actor "Agent / Agence (Web Angular)" as AGENT
+actor "Locataire (App Flutter)" as TENANT
+actor "Propriétaire" as OWNER
+actor "PSP (Stripe/Bank)" as PSP
+
+' ----- API Gateway / BFF -----
+rectangle "API Gateway / BFF\n(auth JWT, composition, caching)" as APIGW #DDDDFF
+
+AGENT --> APIGW : UI REST calls (Angular)
+TENANT --> APIGW : Mobile REST calls (Flutter)
+OWNER --> APIGW : Owner REST calls
+
+' ----- Message Broker (async) -----
+cloud "Message Broker\n(Kafka / RabbitMQ)" as BROKER #FFE7C6
+
+' ----- Microservices (bounded contexts) -----
+rectangle "Properties & Leases\n(PL)\nAggregates: Property, Lease\nAPIs (examples):\n- POST /properties\n- POST /leases\nPublishes: LeaseCreated, LeaseActivated, LeaseCancelled\nConsumes: DepositAuthorized, PaymentCaptured" as PL #F5FFEA
+
+rectangle "People (Tenants & Owners)\n(P)\nAggregates: Person (Tenant/Owner)\nAPIs:\n- POST /persons\n- GET /persons/{id}\nPublishes: PersonCreated\nConsumes: LeaseCreated, PaymentCaptured" as P #FFF0F0
+
+rectangle "Payments & Receipts\n(PAY)\nAggregates: Payment, Receipt\nAPIs:\n- POST /payments\n- GET /payments/{id}\nPublishes: DepositAuthorized, DepositAuthorizationFailed, PaymentCaptured, ReceiptIssued\nConsumes: LeaseCreated, LeaseActivated" as PAY #F0F8FF
+
+rectangle "Maintenance / Tickets\n(M)\nAggregates: Ticket, WorkOrder\nAPIs:\n- POST /tickets\n- PATCH /tickets/{id}/resolve\nPublishes: TicketCreated, TicketResolved\nConsumes: PropertyCreated, LeaseActivated" as M #FFF8E1
+
+rectangle "Notification / Email\n(NOTIF)\nResponsibilities: send emails/push, templates\nAPIs:\n- POST /notify\nConsumes: PaymentCaptured, TicketCreated, LeaseActivated" as NOTIF #F2F2FF
+
+' ----- Data stores (visual only - per service DB) -----
+database "PL DB\n(properties, leases, outbox)" as DB_PL
+database "P DB\n(persons, profiles)" as DB_P
+database "PAY DB\n(payments, receipts, outbox)" as DB_PAY
+database "M DB\n(tickets, activities)" as DB_M
+
+PL --> DB_PL
+P  --> DB_P
+PAY --> DB_PAY
+M  --> DB_M
+
+' ----- Sync interactions (REST) -----
+APIGW --> PL : REST /leases, /properties (sync)
+APIGW --> P  : REST /persons (sync)
+APIGW --> PAY: REST /payments (sync)
+APIGW --> M  : REST /tickets (sync)
+
+' Services calling each other synchronously (limited use)
+PAY ..> P : GET /persons/{tenantId} [read tenant info]
+PL ..> P  : GET /persons/{tenantId} [validate tenant]
+M  ..> PL : GET /properties/{id} [fetch property metadata]
+
+' ----- Async interactions (events via broker) -----
+PL -[#0000FF,thickness=2]-> BROKER : LeaseCreated (event)\nLeaseActivated\nLeaseCancelled
+PAY -[#0000FF,thickness=2]-> BROKER : DepositAuthorized\nPaymentCaptured\nReceiptIssued
+P   -[#0000FF,thickness=2]-> BROKER : PersonCreated
+M   -[#0000FF,thickness=2]-> BROKER : TicketCreated\nTicketResolved
+NOTIF -[#0000FF,thickness=2]-> BROKER : NotificationRequested
+
+' Consumers (subscribe)
+BROKER -[#006400,thickness=2]-> PAY : LeaseCreated -> authorize deposit
+BROKER -[#006400,thickness=2]-> PL  : DepositAuthorized -> activate lease
+BROKER -[#006400,thickness=2]-> P   : LeaseCreated -> attach lease summary
+BROKER -[#006400,thickness=2]-> PL  : PaymentCaptured -> mark rent paid
+BROKER -[#006400,thickness=2]-> NOTIF : PaymentCaptured / TicketCreated -> send notifications
+BROKER -[#006400,thickness=2]-> M   : LeaseActivated -> link lease -> enable ticket actions
+
+' ----- External PSP interaction (Payments) -----
+PAY --> PSP : Authorize / Capture (HTTP, tokenized cards)
+PSP --> PAY : Response (async/HTTP)
+
+' Legend
+note left of BROKER
+  Legend:
+  ->  : synchronous REST call
+  ==> : asynchronous event (via broker)
+  Each service owns DB & outbox (outbox pattern)
+end note
+
+@enduml

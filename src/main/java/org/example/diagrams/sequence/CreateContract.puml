@@ -1,0 +1,71 @@
+@startuml CreateLease
+title Création d'un contrat (Lease) avec autorisation dépôt (saga chorégraphie)
+
+actor "Agent App / Tenant" as Client
+participant "API Gateway" as APIGW
+participant "Properties Service (PL)" as PL
+participant "Properties DB (DB_PL)" as DBPL
+participant "PL Outbox Worker" as PL_WORKER
+participant "Message Broker" as BROKER
+participant "Payments Service (PAY)" as PAY
+participant "Payments DB" as DBPAY
+participant "PAY Worker" as PAY_WORKER
+participant "PSP (External)" as PSP
+participant "Notification (NOTIF)" as NOTIF
+
+Client -> APIGW : POST /api/leases\n(Idempotency-Key)
+APIGW -> PL : POST /leases
+activate PL
+
+PL -> DBPL : BEGIN TX\nINSERT lease(state=PENDING)\nINSERT outbox {LeaseCreated}
+DBPL --> PL : COMMIT
+deactivate PL
+
+PL -> PL_WORKER : notify worker
+activate PL_WORKER
+PL_WORKER -> BROKER : publish LeaseCreated
+PL_WORKER -> DBPL : mark outbox published
+deactivate PL_WORKER
+
+== PAY consumes LeaseCreated ==
+BROKER -> PAY : LeaseCreated
+activate PAY
+
+note right of PAY
+  PAY creates Payment intent for deposit
+  Payment INITIATED with idempotencyKey = leaseId|DEPOSIT
+end note
+
+PAY -> DBPAY : BEGIN TX\nINSERT payment(status=INITIATED)\nINSERT outbox {DepositAuthorizationRequested}\nDBPAY --> PAY : COMMIT
+
+PAY -> PAY_WORKER : notify
+activate PAY_WORKER
+PAY_WORKER -> BROKER : publish DepositAuthorizationRequested
+PAY_WORKER -> DBPAY : mark outbox published
+deactivate PAY_WORKER
+
+== PAY calls PSP to authorize deposit ==
+PAY -> PSP : POST /authorize (idempotencyKey)
+alt PSP success
+  PSP --> PAY : AUTHORIZED {providerTxId}
+  PAY -> DBPAY : UPDATE payment.status = AUTHORIZED\nINSERT outbox {DepositAuthorized}
+else PSP fail
+  PSP --> PAY : DECLINED
+  PAY -> DBPAY : UPDATE payment.status=FAILED\nINSERT outbox {DepositAuthorizationFailed}
+end
+
+PAY_WORKER -> BROKER : publish DepositAuthorized / DepositAuthorizationFailed
+
+== PL consumes DepositAuthorized ==
+BROKER -> PL : DepositAuthorized
+activate PL
+PL -> DBPL : UPDATE lease.state = ACTIVE\nUPDATE property.status = RENTED\nINSERT outbox {LeaseActivated}
+DBPL --> PL : COMMIT
+deactivate PL
+
+PL_WORKER -> BROKER : publish LeaseActivated
+
+BROKER -> NOTIF : LeaseActivated
+NOTIF -> Client : send notification (lease active, welcome)
+
+@enduml

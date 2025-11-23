@@ -1,0 +1,51 @@
+@startuml TerminateLease
+title Résiliation d'un contrat (Lease) — workflow et compensation éventuelle
+
+actor "Tenant / Agent" as Client
+participant "API Gateway" as APIGW
+participant "Properties Service (PL)" as PL
+participant "PL DB" as DBPL
+participant "PL Outbox Worker" as PL_WORKER
+participant "Message Broker" as BROKER
+participant "Payments Service (PAY)" as PAY
+participant "PAY DB" as DBPAY
+participant "PAY Worker" as PAY_WORKER
+participant "Notification (NOTIF)" as NOTIF
+
+Client -> APIGW : POST /api/leases/{id}/terminate {effectiveDate}
+APIGW -> PL : POST /leases/{id}/terminate
+activate PL
+
+PL -> DBPL : BEGIN TX\nLOAD lease\nvalidate notice period\nUPDATE lease state=TERMINATING\nINSERT outbox {LeaseTerminationRequested}\nDBPL --> PL : COMMIT
+deactivate PL
+
+PL -> PL_WORKER : notify
+PL_WORKER -> BROKER : publish LeaseTerminationRequested
+PL_WORKER -> DBPL : mark published
+
+== PAY consumes to evaluate refunds/holdings ==
+BROKER -> PAY : LeaseTerminationRequested
+activate PAY
+PAY -> DBPAY : find payments related to lease (deposit, prepaid rents)
+alt refund needed
+  PAY -> PSP : POST /refund (idempotencyKey)
+  PSP --> PAY : 200 REFUND_OK
+  PAY -> DBPAY : INSERT outbox {RefundIssued}
+else no refund
+  PAY -> DBPAY : INSERT outbox {NoRefundNeeded}
+end
+PAY -> PAY_WORKER : notify
+PAY_WORKER -> BROKER : publish RefundIssued / NoRefundNeeded
+deactivate PAY
+
+== PL finalizes termination ==
+BROKER -> PL : RefundIssued / NoRefundNeeded
+activate PL
+PL -> DBPL : UPDATE lease state = CANCELLED\nUPDATE property.status = AVAILABLE\nINSERT outbox {LeaseCancelled}\nDBPL --> PL : COMMIT
+deactivate PL
+
+PL_WORKER -> BROKER : publish LeaseCancelled
+BROKER -> NOTIF : LeaseCancelled
+NOTIF -> Client : send confirmation of termination and refund receipt
+
+@enduml

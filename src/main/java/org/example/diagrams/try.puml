@@ -1,0 +1,64 @@
+@startuml SystemUseCases
+
+left to right direction
+
+' ==== ACTORS ====
+actor Agent
+actor Tenant
+actor Owner
+actor Tech
+actor PSP as "PSP (Payment Provider)"
+
+' ==== BOUNDED CONTEXTS ====
+
+rectangle "Property & Leasing (PROP)" <<PROP>> {
+  usecase UC_ViewProperty as "Consulter biens"
+  usecase UC_CreateProperty as "Créer bien"
+  usecase UC_CreateLease as "Créer contrat location"
+  usecase UC_CancelLease as "Annuler contrat"
+  usecase UC_ViewPerson as "Consulter profil"
+}
+
+rectangle "Payments & Receipts (PAY)" <<PAY>> {
+  usecase UC_InitiatePayment as "Initier paiement (deposit / rent)"
+  usecase UC_HandleWebhook as "Gérer webhook PSP"
+  usecase UC_GenerateReceipt as "Générer quittance"
+}
+
+rectangle "Maintenance (M)" <<M>> {
+  usecase UC_CreateTicket as "Créer ticket maintenance"
+  usecase UC_AssignTicket as "Assigner technicien"
+  usecase UC_CloseTicket as "Clôturer ticket"
+}
+
+rectangle "Notification (NOTIF)" <<NOTIF>> {
+  usecase UC_SendNotification as "Envoyer notification"
+}
+
+' ==== ASSOCIATIONS ====
+
+Agent --> UC_CreateProperty
+Agent --> UC_CreateLease
+Agent --> UC_CancelLease
+Agent --> UC_AssignTicket
+
+Tenant --> UC_CreateLease
+Tenant --> UC_InitiatePayment
+Tenant --> UC_CreateTicket
+Tenant --> UC_ViewProperty
+
+Owner --> UC_ViewProperty
+Owner --> UC_ViewPerson
+
+Tech --> UC_AssignTicket
+Tech --> UC_CloseTicket
+
+PSP --> UC_HandleWebhook
+
+' ==== CROSS-SERVICE RELATIONS ====
+UC_CreateLease .> UC_InitiatePayment : "triggers"
+UC_InitiatePayment .> UC_GenerateReceipt : "on success"
+UC_CreateTicket .> UC_SendNotification : "notifies"
+UC_HandleWebhook .> UC_GenerateReceipt : "may trigger"
+
+@enduml

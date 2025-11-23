@@ -1,0 +1,43 @@
+@startuml CreateProperty
+title Créer un bien (Property) — validation, persist, event
+
+actor "Agent App" as Agent
+participant "API Gateway" as APIGW
+participant "Properties Service (PL)" as PL
+participant "PL DB" as DBPL
+participant "PL Outbox Worker" as PL_WORKER
+participant "Message Broker" as BROKER
+participant "People Service (P)" as P
+participant "Notification (NOTIF)" as NOTIF
+
+Agent -> APIGW : POST /api/properties {ownerId, address, rent,...}
+APIGW -> PL : POST /properties
+activate PL
+
+note right of PL
+  Validation:
+  - ownerId exists? (read from P via cached read-model or sync call)
+  - address format
+end note
+
+alt owner exists in cache
+  PL -> DBPL : INSERT property\nINSERT outbox {PropertyCreated}\nDBPL --> PL : COMMIT
+else owner not in cache -> quick sync check
+  PL -> P : GET /persons/{ownerId} (circuit-breaker, timeout)
+  alt P returns 200
+    PL -> DBPL : INSERT property + outbox\nDBPL --> PL : COMMIT
+  else P unreachable or 404
+    PL -> APIGW : 400/422 Owner not found
+
+  end
+end
+
+PL -> PL_WORKER : notify
+PL_WORKER -> BROKER : publish PropertyCreated
+PL_WORKER -> DBPL : mark published
+
+BROKER -> NOTIF : PropertyCreated
+NOTIF -> Agent : publish confirmation
+
+deactivate PL
+@enduml

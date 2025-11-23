@@ -1,0 +1,30 @@
+@startuml TerminateLease
+title Résiliation d'un contrat (Lease) — Version simplifiée (sans refund ni modification des paiements)
+
+actor "Tenant / Agent" as Client
+participant "API Gateway" as APIGW
+participant "Properties Service (PL)" as PL
+participant "PL DB" as DBPL
+participant "PL Outbox Worker" as PL_WORKER
+participant "Message Broker" as BROKER
+participant "Payments Service (PAY)" as PAY
+participant "PAY DB" as DBPAY
+participant "Notification (NOTIF)" as NOTIF
+
+== 1. La demande de résiliation ==
+Client -> APIGW : POST /api/leases/{id}/terminate {effectiveDate}
+APIGW -> PL : POST /leases/{id}/terminate
+activate PL
+
+PL -> DBPL : BEGIN TX\nLOAD lease\nvalidate dates\nUPDATE lease state=CANCELLED\nUPDATE property.status=AVAILABLE\nINSERT outbox {LeaseCancelled}\nDBPL --> PL : COMMIT
+deactivate PL
+
+PL -> PL_WORKER : notify
+PL_WORKER -> BROKER : publish LeaseCancelled
+PL_WORKER -> DBPL : mark published
+
+== 2. Notification ==
+BROKER -> NOTIF : LeaseCancelled
+NOTIF -> Client : send confirmation of termination
+
+@enduml

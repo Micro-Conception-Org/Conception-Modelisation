@@ -1,0 +1,51 @@
+@startuml TicketFlow
+title Traiter une réclamation (ticket) — création → notification → assignation → résolution
+
+actor "Tenant App" as Tenant
+actor "Agent" as Agent
+participant "API Gateway" as APIGW
+participant "Maintenance Service (M)" as M
+participant "M DB" as DBM
+participant "M Outbox Worker" as M_WORKER
+participant "Message Broker" as BROKER
+participant "Notification Service (NOTIF)" as NOTIF
+participant "Technician App" as TechApp
+
+== Create Ticket ==
+Tenant -> APIGW : POST /api/tickets {propertyId, description}
+APIGW -> M : POST /tickets
+activate M
+M -> DBM : BEGIN TX\nINSERT ticket(status=OPEN)\nINSERT outbox {TicketCreated}\nDBM --> M : COMMIT
+deactivate M
+
+M -> M_WORKER : notify worker
+M_WORKER -> BROKER : publish TicketCreated
+M_WORKER -> DBM : mark published
+
+== Notifications to tenant & agent ==
+BROKER -> NOTIF : TicketCreated
+NOTIF -> Tenant : send confirmation
+NOTIF -> Agent : send new ticket alert
+
+== Agent assigns technician ==
+Agent -> APIGW : PATCH /tickets/{id}/assign {technicianId}
+APIGW -> M : PATCH /tickets/{id}/assign
+activate M
+M -> DBM : UPDATE ticket set assignedTo, status=ASSIGNED\nINSERT outbox {TicketAssigned}\nDBM --> M : COMMIT
+deactivate M
+
+M_WORKER -> BROKER : publish TicketAssigned
+BROKER -> TechApp : notify assigned technician
+
+== Technician resolves ticket ==
+TechApp -> APIGW : PATCH /tickets/{id}/resolve
+APIGW -> M : PATCH /tickets/{id}/resolve
+activate M
+M -> DBM : UPDATE ticket status=RESOLVED, resolvedAt\nINSERT outbox {TicketResolved}\nDBM --> M : COMMIT
+deactivate M
+
+M_WORKER -> BROKER : publish TicketResolved
+BROKER -> NOTIF : TicketResolved
+NOTIF -> Tenant : send resolution notification
+
+@enduml

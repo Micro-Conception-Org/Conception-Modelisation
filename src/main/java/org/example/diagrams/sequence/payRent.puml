@@ -1,0 +1,80 @@
+@startuml RentPayment
+title Paiement de loyer — sequence détaillée
+
+actor "Tenant App" as Tenant
+participant "API Gateway" as APIGW
+participant "Payments Service (PAY)" as PAY
+participant "Payments DB (DB_PAY)" as DBPAY
+participant "Outbox Worker (PAY)" as PAY_WORKER
+participant "Message Broker (Kafka/RMQ)" as BROKER
+participant "Payments Worker (Receipt gen)" as RECEIPT_WORKER
+participant "PSP (External)" as PSP
+participant "Properties Service (PL)" as PL
+participant "Notification Service (NOTIF)" as NOTIF
+
+== Start: tenant initie paiement ==
+Tenant -> APIGW : POST /api/payments\nHeaders: Authorization, Idempotency-Key
+APIGW -> PAY : POST /payments (forward)
+activate PAY
+
+note right of PAY
+  Validation:
+  - Auth token scopes
+  - payload shape
+  - idempotency key check
+end note
+
+PAY -> DBPAY : BEGIN TX\nINSERT payment (status=INITIATED, idempotencyKey)\nINSERT outbox { event: PaymentInitiated }
+DBPAY --> PAY : TX COMMIT
+note right: Atomic write: payment + outbox in one tx
+
+deactivate PAY
+PAY -> PAY_WORKER : (async) notify worker to publish outbox
+activate PAY_WORKER
+PAY_WORKER -> DBPAY : SELECT outbox where published=false
+PAY_WORKER -> BROKER : publish PaymentInitiated (at-least-once)
+PAY_WORKER -> DBPAY : mark outbox.published=true
+deactivate PAY_WORKER
+
+== PAY calls PSP after DB commit ==
+PAY -> PSP : POST /authorize (include idempotencyKey, paymentMethodToken)
+activate PSP
+alt PSP sync success
+  PSP --> PAY : 200 AUTHORIZED {providerTxId}
+  PAY -> DBPAY : UPDATE payment set status=AUTHORIZED, pspTransactionId
+  PAY -> DBPAY : INSERT outbox {event: PaymentAuthorized}
+else PSP async (webhook) or delayed
+  PSP --> PAY : 202 accepted (or nothing)
+
+end
+
+== If authorized -> capture or immediate capture ==
+alt capture immediate
+  PAY -> PSP : POST /capture (idempotencyKey)
+  PSP --> PAY : 200 CAPTURED {captureId}
+  PAY -> DBPAY : UPDATE payment set status=CAPTURED, capturedAt
+  PAY -> DBPAY : INSERT outbox {event: PaymentCaptured, receiptRequested}
+else webhook-driven capture
+  PSP -> APIGW : POST /payments/webhook {providerTxId, status}
+  APIGW -> PAY : forward webhook
+  PAY -> DBPAY : idempotent handler -> update status, insert outbox PaymentCaptured
+end
+
+== Outbox publishes PaymentCaptured ==
+PAY_WORKER -> BROKER : publish PaymentCaptured
+BROKER -> PL : subscribe PaymentCaptured (async)
+BROKER -> NOTIF : subscribe PaymentCaptured
+BROKER -> RECEIPT_WORKER : subscribe PaymentCaptured
+
+== Receipt generation & notifications ==
+RECEIPT_WORKER -> DBPAY : generate receipt row & PDF, update payment.receiptId
+RECEIPT_WORKER -> DBPAY : INSERT outbox {ReceiptIssued}
+RECEIPT_WORKER -> BROKER : publish ReceiptIssued
+NOTIF <- BROKER : ReceiptIssued
+NOTIF -> Tenant : send email/push with receipt
+
+== PL ledger update ==
+PL <- BROKER : PaymentCaptured
+PL -> DB_PL : update ledger, mark rent paid
+
+@enduml

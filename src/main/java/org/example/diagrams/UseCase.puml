@@ -1,0 +1,192 @@
+' Use Case diagrams for Real Estate Microservices
+' PlantUML file with multiple diagrams: system-level and per-service
+' Paste each block into a .puml file or use PlantUML preview in IntelliJ
+
+' -------------------------
+' System-level Use Case Diagram
+' -------------------------
+@startuml SystemUseCases
+' style
+skinparam backgroundColor #F6F8FB
+skinparam usecase {
+  BackgroundColor<<PL>> #FFFBEC
+  BackgroundColor<<PAY>> #ECFBFF
+  BackgroundColor<<P>> #F0FFF0
+  BackgroundColor<<M>> #FFF0F6
+  BorderColor #333333
+  FontName Arial
+}
+
+left to right direction
+
+actor "Agent (Agence)" as Agent
+actor "Tenant (Locataire)" as Tenant
+actor "Owner (Propriétaire)" as Owner
+actor "Technician" as Tech
+actor "External PSP" as PSP
+
+rectangle "Properties & Leases (PL)" <<PL>> {
+  usecase UC_CreateProperty as "Créer un bien"
+  usecase UC_CreateLease as "Créer un contrat (Lease)"
+  usecase UC_CancelLease as "Résilier contrat"
+  usecase UC_ViewProperty as "Consulter bien"
+}
+
+rectangle "People (P)" <<P>> {
+  usecase UC_CreatePerson as "Créer / Mettre à jour profil"
+  usecase UC_ViewPerson as "Consulter profil"
+}
+
+rectangle "Payments & Receipts (PAY)" <<PAY>> {
+  usecase UC_InitiatePayment as "Initier paiement (deposit / rent)"
+  usecase UC_HandleWebhook as "Gérer webhook PSP"
+  usecase UC_GenerateReceipt as "Générer quittance"
+}
+
+rectangle "Maintenance (M)" <<M>> {
+  usecase UC_CreateTicket as "Créer ticket maintenance"
+  usecase UC_AssignTicket as "Assigner technicien"
+  usecase UC_CloseTicket as "Clôturer ticket"
+}
+
+rectangle "Notification (NOTIF)" {
+  usecase UC_SendNotification as "Envoyer notification"
+}
+
+' Associations
+Agent --> UC_CreateProperty
+Agent --> UC_CreateLease
+Agent --> UC_CancelLease
+Agent --> UC_AssignTicket
+
+Tenant --> UC_CreateLease
+Tenant --> UC_InitiatePayment
+Tenant --> UC_CreateTicket
+Tenant --> UC_ViewProperty
+
+Owner --> UC_ViewProperty
+Owner --> UC_ViewPerson
+
+Tech --> UC_AssignTicket
+Tech --> UC_CloseTicket
+
+PSP --> UC_HandleWebhook
+
+' Cross-service relations (illustrative)
+UC_CreateLease .> UC_InitiatePayment : "triggers (event)"
+UC_InitiatePayment .> UC_GenerateReceipt : "on success"
+UC_CreateTicket .> UC_SendNotification : "notifies"
+UC_HandleWebhook .> UC_GenerateReceipt : "may trigger"
+
+@enduml
+
+' -------------------------
+' Payment Service - Use Cases (detailed)
+' -------------------------
+@startuml PaymentUseCases
+skinparam backgroundColor #FFFFFF
+left to right direction
+
+actor "Tenant" as T
+actor "Agent" as A
+actor "PSP (External)" as PSP
+
+package "Payments Service (PAY)" {
+  usecase pay_initiate as "Initier paiement (POST /payments)\n- idempotency-key required"
+  usecase pay_status as "Consulter statut paiement (GET /payments/{id})"
+  usecase pay_webhook as "Recevoir webhook PSP (POST /payments/webhook)"
+  usecase pay_receipt as "Générer quittance (Receipt)"
+  usecase pay_refund as "Rembourser paiement"
+}
+
+T --> pay_initiate
+A --> pay_initiate
+PSP --> pay_webhook
+
+' Internal collaborations (notes as relationships)
+pay_initiate .> pay_webhook : "calls PSP / async confirmation"
+pay_webhook .> pay_receipt : "publish PaymentCaptured"
+pay_receipt .> pay_status : "attach receiptId"
+
+' constraints / AC visual hint
+note right of pay_initiate
+  AC:
+  - idempotency
+  - persist Payment + outbox in one TX
+  - return 202 Accepted
+end note
+
+@enduml
+
+' -------------------------
+' Properties & Leases Service - Use Cases
+' -------------------------
+@startuml PropertiesUseCases
+skinparam backgroundColor #FAFFEF
+left to right direction
+
+actor Agent
+actor Tenant
+actor Owner
+
+package "Properties & Leases (PL)" {
+  usecase cprop as "Créer bien (POST /properties)"
+  usecase vprop as "Consulter bien (GET /properties/{id})"
+  usecase clease as "Créer contrat (POST /leases)"
+  usecase alease as "Activer contrat (on DepositAuthorized)"
+  usecase rlease as "Résilier contrat"
+}
+
+Agent --> cprop
+Agent --> clease
+Tenant --> clease
+Agent --> rlease
+
+' Events and cross-service arrows
+clease .> alease : "event: LeaseCreated -> PAY"
+alease .> vprop : "sets property status = RENTED"
+
+note left of clease
+  AC:
+  - idempotency-key
+  - validation: property AVAILABLE
+  - publish LeaseCreated (outbox)
+end note
+
+@enduml
+
+' -------------------------
+' Maintenance Service - Use Cases
+' -------------------------
+@startuml MaintenanceUseCases
+skinparam backgroundColor #FFF7F9
+left to right direction
+
+actor Tenant
+actor Agent
+actor Technician as Tech
+
+package "Maintenance (M)" {
+  usecase create_ticket as "Créer ticket (POST /tickets)"
+  usecase assign_ticket as "Assigner technicien (PATCH)"
+  usecase update_ticket as "Mettre à jour / Résoudre"
+}
+
+Tenant --> create_ticket
+Agent --> assign_ticket
+Tech --> update_ticket
+
+create_ticket .> "Notification Service" : "publish TicketCreated"
+assign_ticket .> "Notification Service" : "publish TicketAssigned"
+
+note right of create_ticket
+  AC:
+  - link ticket to propertyId
+  - publish TicketCreated (outbox)
+end note
+
+@enduml
+
+' -------------------------
+' End of file
+' -------------------------
