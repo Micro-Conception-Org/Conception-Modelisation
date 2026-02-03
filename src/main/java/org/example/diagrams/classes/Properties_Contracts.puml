@@ -1,0 +1,52 @@
+@startuml PL_Domain
+
+class Property {
+    +propertyId : UUID
+    +title : String
+    +type : PropertyType
+    +address : Address
+    +ownerId : UUID
+    +status : PropertyStatus
+    --
+    +markAsRented()
+    +markAsAvailable()
+}
+
+enum PropertyType {
+    APARTMENT
+    HOUSE
+    STUDIO
+}
+
+enum PropertyStatus {
+    AVAILABLE
+    RENTED
+}
+
+class Address {
+    +street : String
+    +city : String
+    +zipCode : String
+}
+
+class Lease {
+    +leaseId : UUID
+    +propertyId : UUID
+    +tenantId : UUID
+    +startDate : LocalDate
+    +endDate : LocalDate
+    +rentAmount : BigDecimal
+    +state : LeaseState
+    --
+    +terminate()
+}
+
+enum LeaseState {
+    ACTIVE
+    TERMINATING
+    CANCELLED
+}
+
+Property "1" --> "0..1" Lease : currentLease
+
+@enduml
